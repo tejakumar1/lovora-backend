@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from flask import url_for
 import os
 import uuid
 
@@ -78,255 +79,210 @@ class Comment(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     text = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+    user = db.relationship('User', backref='comments')
 
+class SavedPost(db.Model):
+    __tablename__ = "saved_posts"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('posts.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'post_id', name='unique_saved_post'),
+    )
 otp_store = {}
 
-@app.route('/check-username', methods=['POST'])
-def check_username():
-    username = request.json.get("username")
-    if not username:
-        return jsonify({"error": "Username required"}), 400
-
-    user = User.query.filter_by(username=username).first()
-    return jsonify({"available": user is None})
 
 
-@app.route('/check-mobile', methods=['POST'])
-def check_mobile():
-    mobile = request.json.get("mobile")
-    if not mobile:
-        return jsonify({"error": "Mobile required"}), 400
 
-    user = User.query.filter_by(mobile=mobile).first()
-    return jsonify({"exists": user is not None})
-
-
-@app.route('/send-otp', methods=['POST'])
-def send_otp():
-    mobile = request.json.get("mobile")
-
-    otp = "222222" if mobile == "2222222222" else "123456"
-    otp_store[mobile] = otp
-
-    return jsonify({"otp": otp})
-
-
-@app.route('/verify-otp', methods=['POST'])
-def verify_otp():
-    otp = request.json.get("otp")
-    valid = otp in otp_store.values() or otp == "222222"
-    return jsonify({"verified": valid})
-
-
-@app.route('/register', methods=['POST'])
-def register():
-    data = request.json
-
-    if not data.get("username") or not data.get("mobile"):
-        return jsonify({"error": "Missing fields"}), 400
-
-    existing = User.query.filter_by(mobile=data["mobile"]).first()
-    if existing:
-        return jsonify({"error": "User already exists"}), 400
-
-    last_user = User.query.order_by(User.id.desc()).first()
-    if last_user:
-        new_id = last_user.id + 1
-    else:
-        new_id = 300000
-
-    user = User(
-        id=new_id,
-        username=data["username"],
-        mobile=data["mobile"],
-        biometric_enabled=data.get("biometric_enabled", False)
-    )
-
-    db.session.add(user)
-    db.session.commit()
-
-    return jsonify({
-        "success": True,
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "mobile": user.mobile
-        }
-    })
-
-
-@app.route('/login', methods=['POST'])
-def login():
-    identifier = request.json.get("identifier")
-
-    user = User.query.filter(
-        (User.mobile == identifier) | (User.username == identifier)
-    ).first()
-
-    if not user:
-        return jsonify({"exists": False})
-
-    token = str(uuid.uuid4())
-
-    return jsonify({
-        "exists": True,
-        "token": token,
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "mobile": user.mobile,
-            "email": user.email,
-            "bio": user.bio,
-            "location": user.location,
-            "biometric_enabled": user.biometric_enabled
-        }
-    })
-@app.route('/create-post', methods=['POST'])
-def create_post():
+@app.route('/posts/<int:post_id>/like', methods=['POST'])
+def like_post(post_id):
     try:
-        data = request.json
+        data = request.get_json() or {}
+        user_id = data.get("user_id")
 
-        # ✅ SAFE USER ID
-        user_id = int(data.get("user_id", 0))
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
 
-        user = User.query.get(user_id)
+        post = db.session.get(Post, post_id)
+        if not post:
+            return jsonify({"error": "Post not found"}), 404
+
+        existing = Like.query.filter_by(user_id=user_id, post_id=post_id).first()
+        if existing:
+            likes_count = Like.query.filter_by(post_id=post_id).count()
+            return jsonify({
+                "success": True,
+                "liked": True,
+                "likes_count": likes_count
+            })
+
+        db.session.add(Like(user_id=user_id, post_id=post_id))
+        db.session.commit()
+
+        likes_count = Like.query.filter_by(post_id=post_id).count()
+
+        return jsonify({
+            "success": True,
+            "liked": True,
+            "likes_count": likes_count
+        })
+    except Exception as e:
+        print("LIKE ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/posts/<int:post_id>/like', methods=['DELETE'])
+def unlike_post(post_id):
+    try:
+        data = request.get_json() or {}
+        user_id = data.get("user_id")
+
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+
+        like = Like.query.filter_by(user_id=user_id, post_id=post_id).first()
+
+        if like:
+            db.session.delete(like)
+            db.session.commit()
+
+        likes_count = Like.query.filter_by(post_id=post_id).count()
+
+        return jsonify({
+            "success": True,
+            "liked": False,
+            "likes_count": likes_count
+        })
+    except Exception as e:
+        print("UNLIKE ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/posts/<int:post_id>/comments', methods=['GET'])
+def get_comments(post_id):
+    try:
+        post = db.session.get(Post, post_id)
+        if not post:
+            return jsonify({"error": "Post not found"}), 404
+
+        comments = Comment.query.filter_by(post_id=post_id).order_by(Comment.created_at.desc()).all()
+
+        return jsonify([
+            {
+                "id": c.id,
+                "text": c.text,
+                "created_at": c.created_at.isoformat(),
+                "user": {
+                    "id": c.user.id,
+                    "username": c.user.username
+                }
+            }
+            for c in comments
+        ])
+    except Exception as e:
+        print("GET COMMENTS ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/posts/<int:post_id>/comments', methods=['POST'])
+def add_comment(post_id):
+    try:
+        data = request.get_json() or {}
+        user_id = data.get("user_id")
+        text = (data.get("text") or "").strip()
+
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+
+        if not text:
+            return jsonify({"error": "Comment text is required"}), 400
+
+        post = db.session.get(Post, post_id)
+        if not post:
+            return jsonify({"error": "Post not found"}), 404
+
+        user = db.session.get(User, user_id)
         if not user:
-            return jsonify({"error": "Invalid user"}), 400
+            return jsonify({"error": "User not found"}), 404
 
-        # ✅ SAFE TYPE
-        post_type = data.get("type", "text")
-
-        post = Post(
+        comment = Comment(
             user_id=user_id,
-            type=post_type,
-            caption=data.get("caption", "")
+            post_id=post_id,
+            text=text
         )
 
-        db.session.add(post)
+        db.session.add(comment)
         db.session.commit()
 
-        # ✅ SAFE MEDIA HANDLING
-        media_list = data.get("media", [])
+        comments_count = Comment.query.filter_by(post_id=post_id).count()
 
-        if isinstance(media_list, list):
-            for m in media_list:
-                db.session.add(Media(
-                    post_id=post.id,
-                    media_url=m.get("url", ""),
-                    media_type=m.get("type", "file")
-                ))
-
-        db.session.commit()
-
-        return jsonify({"success": True, "post_id": post.id})
-
-    except Exception as e:
-        print("🔥 CREATE POST ERROR:", str(e))  # 👈 VERY IMPORTANT
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/update-post/<int:post_id>', methods=['PUT'])
-def update_post(post_id):
-    try:
-        data = request.json
-
-        post = db.session.get(Post, post_id)
-
-        if not post:
-            return jsonify({"error": "Post not found"}), 404
-
-        # 🔥 UPDATE CAPTION
-        post.caption = data.get("caption", post.caption)
-
-        db.session.commit()
-
-        return jsonify({"success": True, "message": "Post updated"})
-
-    except Exception as e:
-        print("🔥 UPDATE POST ERROR:", e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/delete-post/<int:post_id>', methods=['DELETE'])
-def delete_post(post_id):
-    try:
-        post = db.session.get(Post, post_id)
-
-        if not post:
-            return jsonify({"error": "Post not found"}), 404
-
-        # 🔥 DELETE MEDIA FIRST (IMPORTANT)
-        Media.query.filter_by(post_id=post.id).delete()
-
-        db.session.delete(post)
-        db.session.commit()
-
-        return jsonify({"success": True, "message": "Post deleted"})
-
-    except Exception as e:
-        print("🔥 DELETE POST ERROR:", e)
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/feed', methods=['GET'])
-def get_feed():
-
-    posts = Post.query.order_by(Post.created_at.desc()).all()
-
-    result = []
-
-    for p in posts:
-        result.append({
-            "post_id": p.id,
-            "user": {
-                "id": p.user.id,
-                "username": p.user.username,
-            },
-            "type": p.type,
-            "caption": p.caption,
-            "media": [
-                {"url": m.media_url, "type": m.media_type}
-                for m in p.media
-            ],
-            "likes_count": len(p.likes),
-            "comments_count": len(p.comments),
-            "created_at": p.created_at.isoformat()
+        return jsonify({
+            "success": True,
+            "comments_count": comments_count,
+            "comment": {
+                "id": comment.id,
+                "text": comment.text,
+                "created_at": comment.created_at.isoformat(),
+                "user": {
+                    "id": user.id,
+                    "username": user.username
+                }
+            }
         })
-
-    return jsonify(result)
-
-
-@app.route('/like', methods=['POST'])
-def like_post():
-    data = request.json
-
-    existing = Like.query.filter_by(
-        user_id=data["user_id"],
-        post_id=data["post_id"]
-    ).first()
-
-    if existing:
-        return jsonify({"message": "Already liked"})
-
-    db.session.add(Like(
-        user_id=data["user_id"],
-        post_id=data["post_id"]
-    ))
-
-    db.session.commit()
-    return jsonify({"success": True})
+    except Exception as e:
+        print("ADD COMMENT ERROR:", e)
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/comment', methods=['POST'])
-def comment_post():
-    data = request.json
+@app.route('/posts/<int:post_id>/save', methods=['POST'])
+def save_post(post_id):
+    try:
+        data = request.get_json() or {}
+        user_id = data.get("user_id")
 
-    db.session.add(Comment(
-        user_id=data["user_id"],
-        post_id=data["post_id"],
-        text=data["text"]
-    ))
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
 
-    db.session.commit()
-    return jsonify({"success": True})
+        post = db.session.get(Post, post_id)
+        if not post:
+            return jsonify({"error": "Post not found"}), 404
+
+        existing = SavedPost.query.filter_by(user_id=user_id, post_id=post_id).first()
+
+        if existing:
+            return jsonify({"success": True, "saved": True})
+
+        db.session.add(SavedPost(user_id=user_id, post_id=post_id))
+        db.session.commit()
+
+        return jsonify({"success": True, "saved": True})
+    except Exception as e:
+        print("SAVE ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/posts/<int:post_id>/save', methods=['DELETE'])
+def unsave_post(post_id):
+    try:
+        data = request.get_json() or {}
+        user_id = data.get("user_id")
+
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+
+        saved = SavedPost.query.filter_by(user_id=user_id, post_id=post_id).first()
+
+        if saved:
+            db.session.delete(saved)
+            db.session.commit()
+
+        return jsonify({"success": True, "saved": False})
+    except Exception as e:
+        print("UNSAVE ERROR:", e)
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/profile/<int:user_id>', methods=['GET', 'PATCH'])
 def profile(user_id):
@@ -507,6 +463,76 @@ def profile(user_id):
         "posts_count": len(posts)
     })
 
+# FLUTTER-COMPATIBLE ENDPOINTS (Fixes your 404 errors)
+@app.route('/like-post', methods=['POST', 'OPTIONS'])
+def like_post_simple():
+    data = request.get_json() or {}
+    post_id = data.get("post_id")
+    user_id = data.get("user_id")
+    
+    if not post_id or not user_id:
+        return jsonify({"error": "post_id and user_id required"}), 400
+    
+    post = db.session.get(Post, post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+    
+    existing = Like.query.filter_by(user_id=user_id, post_id=post_id).first()
+    if existing:
+        likes_count = Like.query.filter_by(post_id=post_id).count()
+        return jsonify({"success": True, "already_liked": True, "likes_count": likes_count})
+    
+    db.session.add(Like(user_id=user_id, post_id=post_id))
+    db.session.commit()
+    
+    return jsonify({
+        "success": True, 
+        "liked": True, 
+        "likes_count": Like.query.filter_by(post_id=post_id).count()
+    })
+
+@app.route('/add-comment', methods=['POST', 'OPTIONS'])
+def add_comment_simple():
+    data = request.get_json() or {}
+    post_id = data.get("post_id")
+    user_id = data.get("user_id")
+    text = (data.get("text") or "").strip()
+    
+    if not all([post_id, user_id, text]):
+        return jsonify({"error": "Missing required fields"}), 400
+    
+    post = db.session.get(Post, post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+    
+    comment = Comment(user_id=user_id, post_id=post_id, text=text)
+    db.session.add(comment)
+    db.session.commit()
+    
+    return jsonify({
+        "success": True,
+        "comment_id": comment.id,
+        "comments_count": Comment.query.filter_by(post_id=post_id).count()
+    })
+
+@app.route('/share/post/<int:post_id>', methods=['GET'])
+def share_post(post_id):
+    post = db.session.get(Post, post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    return jsonify({
+        "post_id": post.id,
+        "username": post.user.username,
+        "caption": post.caption,
+        "type": post.type,
+        "media": [
+            {"url": m.media_url, "type": m.media_type}
+            for m in post.media
+        ],
+
+    "share_url": url_for("share_post", post_id=post.id, _external=True)    })
+
 @app.route('/')
 def home():
     return jsonify({"status": "Lovora backend running 🚀"})
@@ -514,3 +540,5 @@ def home():
 with app.app_context():
     db.create_all()
 
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
